@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#2563eb" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="CBT Guru" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="description" content="Aplikasi Computer Based Test (CBT) Sosiologi SMA Assessment TKA 2026 dengan Bank Soal HOTS, Anti-Curang, Panel Guru, dan Excel Import/Export." />
+    <link rel="manifest" href="/manifest.json" />
+    <title>CBT Sosiologi 2026</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+          navigator.serviceWorker.register('/sw.js').then(function(reg) {
+            console.log('[PWA] ServiceWorker registered with scope:', reg.scope);
+          }).catch(function(err) {
+            console.warn('[PWA] ServiceWorker registration failed:', err);
+          });
+        });
+      }
+    </script>
+  </body>
+</html>
+

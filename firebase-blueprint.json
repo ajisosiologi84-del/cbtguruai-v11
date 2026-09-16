@@ -1,0 +1,71 @@
+{
+  "entities": {
+    "CbtConfig": {
+      "title": "CbtConfig",
+      "description": "Central configuration for CBT exams including questions, exam tokens, students, teachers, and settings",
+      "type": "object",
+      "properties": {
+        "schoolName": { "type": "string" },
+        "examTitle": { "type": "string" },
+        "questions": { "type": "array" },
+        "students": { "type": "array" },
+        "teachers": { "type": "array" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "StudentResult": {
+      "title": "StudentResult",
+      "description": "Submitted student exam result record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "score": { "type": "number" },
+        "studentInfo": { "type": "object" },
+        "submittedAt": { "type": "string" }
+      }
+    },
+    "TeacherUser": {
+      "title": "TeacherUser",
+      "description": "Authorized teacher account profile and credentials",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nip": { "type": "string" },
+        "nama": { "type": "string" },
+        "mapel": { "type": "string" },
+        "kodeGuru": { "type": "string" }
+      }
+    },
+    "StudentUser": {
+      "title": "StudentUser",
+      "description": "Student master profile and exam participation status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nis": { "type": "string" },
+        "nama": { "type": "string" },
+        "kelas": { "type": "string" },
+        "kodeGuru": { "type": "string" },
+        "isActive": { "type": "boolean" }
+      }
+    }
+  },
+  "firestore": {
+    "/cbt_config/{configId}": {
+      "schema": { "$ref": "#/entities/CbtConfig" },
+      "description": "Central CBT active configuration"
+    },
+    "/student_results/{resultId}": {
+      "schema": { "$ref": "#/entities/StudentResult" },
+      "description": "Student exam results"
+    },
+    "/teacher_accounts/{teacherId}": {
+      "schema": { "$ref": "#/entities/TeacherUser" },
+      "description": "Teacher accounts master list"
+    },
+    "/cbt_students/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentUser" },
+      "description": "Student accounts master list"
+    }
+  }
+}

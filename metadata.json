@@ -1,0 +1,6 @@
+{
+  "name": "CBT Sosiologi 2026",
+  "description": "Aplikasi Computer Based Test (CBT) Sosiologi SMA Assessment TKA 2026 dengan Bank Soal HOTS, Anti-Curang, Panel Guru, dan Excel Import/Export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
