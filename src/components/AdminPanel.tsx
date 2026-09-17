@@ -25,6 +25,8 @@ import {
   deleteAdminFromFirebase,
   deleteSelectedAdminsFromFirebase,
   saveAllAdminsToFirebase,
+  isQuotaExceededStatus,
+  resetQuotaExceededStatus,
 } from '../lib/firebase';
 
 import {
@@ -255,6 +257,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [rekapSearch, setRekapSearch] = useState('');
   const [rekapKelasFilter, setRekapKelasFilter] = useState<string>('ALL');
   const [rekapKodeSoalFilter, setRekapKodeSoalFilter] = useState<string>('ALL');
+  const [isQuotaWarningVisible, setIsQuotaWarningVisible] = useState<boolean>(() => isQuotaExceededStatus());
+
+  React.useEffect(() => {
+    const checkQuota = () => {
+      setIsQuotaWarningVisible(isQuotaExceededStatus());
+    };
+    checkQuota();
+    window.addEventListener('cbt_quota_exceeded', checkQuota);
+    window.addEventListener('cbt_quota_reset', checkQuota);
+    const interval = setInterval(checkQuota, 4000);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('cbt_quota_exceeded', checkQuota);
+      window.removeEventListener('cbt_quota_reset', checkQuota);
+    };
+  }, []);
 
   // Mapel Config State
   const defaultMapelList = [
@@ -2388,9 +2406,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // --- TEACHER USER MANAGEMENT HANDLERS ---
   const handleDownloadTeacherTemplate = () => {
     const ws_data = [
-      ['NIP', 'Nama', 'Mata_Pelajaran', 'Kode_Guru'],
-      ['198501152010011002', 'Drs. Aji Sosiologi, M.Pd', 'Sosiologi', 'GURU01'],
-      ['198803202012022005', 'Siti Rahmawati, S.Pd', 'Sosiologi', 'GURU02'],
+      ['NIP', 'Nama', 'Mata_Pelajaran', 'Kode_Guru', 'Password', 'Username'],
+      ['198501152010011002', 'Drs. Aji Sosiologi, M.Pd', 'Sosiologi', 'GURU01', 'guru123', 'aji_sosiologi'],
+      ['198803202012022005', 'Siti Rahmawati, S.Pd', 'Sosiologi', 'GURU02', 'guru123', 'siti_rahma'],
     ];
     const ws = XLSX.utils.aoa_to_sheet(ws_data);
     const wb = XLSX.utils.book_new();
@@ -2485,6 +2503,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
         data.forEach((row, idx) => {
           const nipVal = extractRowField(row, 'nip', 'username', 'nik', 'idguru', 'nomorinduk', 'no_nip', 'id');
+          const userVal = extractRowField(row, 'username', 'user', 'id_user', 'akun') || nipVal;
+          const passVal = extractRowField(row, 'password', 'pass', 'katasandi', 'katasandi_guru', 'password_guru') || 'guru123';
           const namaVal = extractRowField(row, 'nama', 'namaguru', 'namalengkap', 'guru', 'name');
           const mapelVal = extractRowField(row, 'matapelajaran', 'mapel', 'pelajaran', 'mata_pelajaran', 'subjek') || 'Sosiologi';
           const kodeGuruVal = (extractRowField(row, 'kodeguru', 'kode_guru', 'kode', 'id_guru') || 'GURU01').toUpperCase();
@@ -2495,9 +2515,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             if (existing) {
               const updatedItem: TeacherUser = {
                 ...existing,
+                nip: nipVal,
                 nama: namaVal,
                 mapel: mapelVal || existing.mapel || 'Sosiologi',
                 kodeGuru: kodeGuruVal || existing.kodeGuru || 'GURU01',
+                username: userVal || existing.username || nipVal,
+                password: passVal || existing.password || 'guru123',
               };
               teacherMap.set(key, updatedItem);
               countUpdated++;
@@ -2508,6 +2531,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 nama: namaVal,
                 mapel: mapelVal,
                 kodeGuru: kodeGuruVal,
+                username: userVal || nipVal,
+                password: passVal || 'guru123',
               };
               teacherMap.set(key, newItem);
               countAdded++;
@@ -3896,6 +3921,46 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             </button>
           </div>
         </header>
+
+        {/* FIRESTORE QUOTA EXCEEDED / LOCAL FALLBACK NOTICE */}
+        {isQuotaWarningVisible && (
+          <div className="bg-amber-50 border-b border-amber-200 px-4 sm:px-6 py-3 text-amber-900 text-xs flex flex-wrap items-center justify-between gap-3 shrink-0">
+            <div className="flex items-center gap-2.5 max-w-3xl">
+              <span className="p-2 rounded-xl bg-amber-200/80 text-amber-800 font-bold shrink-0">
+                <Info className="w-4 h-4" />
+              </span>
+              <div>
+                <p className="font-bold text-amber-950 text-xs sm:text-sm">
+                  Penyimpanan Lokal Aktif (Kuota Tulis Harian Firebase Spark Tercapai)
+                </p>
+                <p className="text-amber-800 text-[11px] leading-relaxed mt-0.5">
+                  Batas kuota gratis Firebase Firestore (20.000 writes/hari) telah tercapai untuk hari ini. Sistem otomatis beralih ke mode penyimpanan lokal (LocalStorage). Seluruh fitur pembuatan soal, jadwal ujian, pengerjaan siswa, dan unduh rekap nilai tetap berjalan normal 100%. Kuota gratis akan direset otomatis setiap hari oleh Google.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href="https://console.firebase.google.com/project/gen-lang-client-0692785103/firestore/databases/ai-studio-cbtguruai-391be9f1-3924-401c-b589-fd0ccc22c199/data?openUpgradeDialog=true"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="bg-amber-800 hover:bg-amber-900 text-white px-3 py-1.5 rounded-xl font-bold text-[11px] transition-all flex items-center gap-1 shadow-xs"
+              >
+                <span>Upgrade di Firebase</span>
+              </a>
+              <button
+                type="button"
+                onClick={async () => {
+                  await resetQuotaExceededStatus();
+                  setIsQuotaWarningVisible(false);
+                  showAlert('Status kuota direset. Sistem mencoba menghubungkan kembali ke Cloud Firestore.');
+                }}
+                className="bg-white hover:bg-amber-100 border border-amber-300 text-amber-900 px-3 py-1.5 rounded-xl font-bold text-[11px] transition-all cursor-pointer"
+              >
+                Coba Sinkron Ulang
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* MULTI-GURU SCOPE CONTROL BANNER */}
         <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white px-4 sm:px-6 py-2.5 border-b border-indigo-900/60 shadow-inner flex flex-wrap items-center justify-between gap-3 shrink-0">

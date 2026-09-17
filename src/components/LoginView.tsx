@@ -197,19 +197,53 @@ export const LoginView: React.FC<LoginViewProps> = ({
       return;
     }
 
-    if (uLower === 'guru' && pLower === 'guru') {
+    if (uLower === 'guru' && (pLower === 'guru' || pLower === 'guru123' || p === '123456')) {
       const defaultTeacher = config.teachers && config.teachers.length > 0 ? config.teachers[0] : undefined;
       onAdminLoginSuccess('teacher', defaultTeacher);
       return;
     }
 
-    // Check if u and p match any teacher's NIP / KodeGuru in config.teachers
-    const localTeacher = (config.teachers || []).find(
-      (t) =>
-        (t.nip.trim().toLowerCase() === uLower || (t.kodeGuru && t.kodeGuru.trim().toLowerCase() === uLower) || t.nama.trim().toLowerCase().includes(uLower)) &&
-        (t.nip.trim().toLowerCase() === pLower || (t.kodeGuru && t.kodeGuru.trim().toLowerCase() === pLower) || pLower === 'guru' || p === '123456')
-    );
+    // Helper matcher for teacher credentials (supports Spreadsheet & Manual formats)
+    const checkTeacherMatch = (t: TeacherUser) => {
+      const tNip = String(t.nip || '').trim().toLowerCase();
+      const tKode = String(t.kodeGuru || '').trim().toLowerCase();
+      const tUser = String(t.username || '').trim().toLowerCase();
+      const tNama = String(t.nama || '').trim().toLowerCase();
+      const tPass = String(t.password || '').trim();
+      const tPassLower = tPass.toLowerCase();
 
+      // Check username / identifier (accepts NIP, Kode Guru, Username, or Nama)
+      const isUserMatch =
+        tNip === uLower ||
+        tKode === uLower ||
+        tUser === uLower ||
+        tNama === uLower ||
+        (tNama.length > 2 && tNama.includes(uLower));
+
+      if (!isUserMatch) return false;
+
+      // Check password:
+      // 1. Password from spreadsheet / config (exact or case-insensitive)
+      // 2. Default password equals teacher's NIP
+      // 3. Default password equals teacher's KodeGuru
+      // 4. Default password equals teacher's Username
+      // 5. Standard defaults: 'guru', 'guru123', '123456', '123', 'JuniorCBT2026'
+      const isPassMatch =
+        (tPass && (tPass === p || tPassLower === pLower)) ||
+        (tNip && tNip === pLower) ||
+        (tKode && tKode === pLower) ||
+        (tUser && tUser === pLower) ||
+        pLower === 'guru' ||
+        pLower === 'guru123' ||
+        p === '123456' ||
+        p === '123' ||
+        p === 'JuniorCBT2026';
+
+      return isPassMatch;
+    };
+
+    // Check if u and p match any teacher in config.teachers
+    const localTeacher = (config.teachers || []).find(checkTeacherMatch);
     if (localTeacher) {
       onAdminLoginSuccess('teacher', localTeacher);
       return;
@@ -230,12 +264,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
     // Fallback: Check Firebase Firestore for teacher account
     try {
       const remoteTeachers = await loadTeachersFromFirebase();
-      const remoteTeacher = remoteTeachers.find(
-        (t) =>
-          t.nip &&
-          (t.nip.trim().toLowerCase() === uLower || (t.kodeGuru && t.kodeGuru.trim().toLowerCase() === uLower)) &&
-          (t.nip.trim().toLowerCase() === pLower || (t.kodeGuru && t.kodeGuru.trim().toLowerCase() === pLower) || pLower === 'guru')
-      );
+      const remoteTeacher = remoteTeachers.find(checkTeacherMatch);
       if (remoteTeacher) {
         onAdminLoginSuccess('teacher', remoteTeacher);
         return;

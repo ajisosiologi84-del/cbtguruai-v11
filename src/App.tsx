@@ -30,9 +30,6 @@ import {
   loadStudentsFromFirebase,
   loadTeachersFromFirebase,
   loadAdminsFromFirebase,
-  saveAllStudentsToFirebase,
-  saveAllTeachersToFirebase,
-  saveAllAdminsToFirebase,
   subscribeTeachersFromFirebase,
   subscribeStudentsFromFirebase,
   subscribeAdminsFromFirebase,
@@ -175,16 +172,7 @@ export default function App() {
     setConfig(updatedConfig);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedConfig));
-      saveConfigToFirebase(updatedConfig);
-      if (updatedConfig.students && updatedConfig.students.length > 0) {
-        saveAllStudentsToFirebase(updatedConfig.students);
-      }
-      if (updatedConfig.teachers && updatedConfig.teachers.length > 0) {
-        saveAllTeachersToFirebase(updatedConfig.teachers);
-      }
-      if (updatedConfig.admins && updatedConfig.admins.length > 0) {
-        saveAllAdminsToFirebase(updatedConfig.admins);
-      }
+      saveConfigToFirebase(updatedConfig).catch(() => {});
     } catch (e) {
       console.error('Failed to save to local storage or Firebase:', e);
     }
@@ -243,7 +231,7 @@ export default function App() {
       }
     }).catch(() => {});
 
-    // Unconditional fetch for Teachers and Students
+    // Fetch Teachers, Students, and Admins from Firebase without auto-seeding write spikes
     loadTeachersFromFirebase().then((remoteTeachers) => {
       if (remoteTeachers && remoteTeachers.length > 0) {
         setConfig((prev) => {
@@ -252,14 +240,6 @@ export default function App() {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
           } catch (e) {}
           return updated;
-        });
-      } else {
-        // Seed initial local teachers to Firebase if remote is empty
-        setConfig((prev) => {
-          if (prev.teachers && prev.teachers.length > 0) {
-            saveAllTeachersToFirebase(prev.teachers);
-          }
-          return prev;
         });
       }
     }).catch(() => {});
@@ -273,14 +253,6 @@ export default function App() {
           } catch (e) {}
           return updated;
         });
-      } else {
-        // Seed initial local students to Firebase if remote is empty
-        setConfig((prev) => {
-          if (prev.students && prev.students.length > 0) {
-            saveAllStudentsToFirebase(prev.students);
-          }
-          return prev;
-        });
       }
     }).catch(() => {});
 
@@ -292,14 +264,6 @@ export default function App() {
             localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
           } catch (e) {}
           return updated;
-        });
-      } else {
-        // Seed initial local admins to Firebase if remote is empty
-        setConfig((prev) => {
-          if (prev.admins && prev.admins.length > 0) {
-            saveAllAdminsToFirebase(prev.admins);
-          }
-          return prev;
         });
       }
     }).catch(() => {});
@@ -984,7 +948,7 @@ export default function App() {
     // Save to local & Firebase student results rekap list
     const updatedResults = [resultObj, ...studentResults.filter((r) => r.studentInfo.noPeserta !== studentInfo.noPeserta)];
     saveStudentResults(updatedResults);
-    saveStudentResultToFirebase(resultObj);
+    saveStudentResultToFirebase(resultObj).catch(() => {});
 
     // Clear autosave session upon successful exam finish
     clearActiveExamSession();

@@ -8,7 +8,10 @@ import {
   collection,
   getDocs,
   deleteDoc,
-  writeBatch
+  writeBatch,
+  disableNetwork,
+  enableNetwork,
+  setLogLevel,
 } from 'firebase/firestore';
 import {
   getAuth,
@@ -20,6 +23,11 @@ import {
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { AppConfig, StudentResult, TeacherUser, StudentUser, AdminUser } from '../types';
+
+// Silence verbose internal Firestore log messages (like backoff warnings)
+try {
+  setLogLevel('silent');
+} catch (e) {}
 
 // Initialize Firebase App
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
@@ -39,16 +47,105 @@ const TEACHERS_COLLECTION = 'teacher_accounts';
 const STUDENTS_COLLECTION = 'cbt_students';
 const ADMINS_COLLECTION = 'admin_accounts';
 
+const QUOTA_STORAGE_KEY = 'cbt_firestore_quota_exceeded_timestamp';
+const LEGACY_QUOTA_STORAGE_KEY = 'cbt_firestore_quota_exceeded_date';
 let isQuotaExceeded = false;
 
-function handleFirestoreError(context: string, error: any) {
-  if (error?.code === 'resource-exhausted' || error?.message?.includes('Quota limit exceeded')) {
-    if (!isQuotaExceeded) {
-      isQuotaExceeded = true;
-      console.warn(`[Firebase Firestore] Quota harian tercapai (${context}). Aplikasi beralih ke mode penyimpanan lokal (LocalStorage).`);
+export function isQuotaExceededStatus(): boolean {
+  if (isQuotaExceeded) return true;
+  try {
+    const savedTimeStr = localStorage.getItem(QUOTA_STORAGE_KEY);
+    if (savedTimeStr) {
+      const savedTime = Number(savedTimeStr);
+      // Quota resets every 24 hours on Google Cloud
+      if (Date.now() - savedTime < 24 * 60 * 60 * 1000) {
+        isQuotaExceeded = true;
+        return true;
+      }
     }
+    const legacyDate = localStorage.getItem(LEGACY_QUOTA_STORAGE_KEY);
+    const today = new Date().toISOString().slice(0, 10);
+    if (legacyDate === today) {
+      isQuotaExceeded = true;
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+export function markQuotaExceeded(context?: string) {
+  isQuotaExceeded = true;
+  try {
+    const now = Date.now();
+    localStorage.setItem(QUOTA_STORAGE_KEY, String(now));
+    localStorage.setItem(LEGACY_QUOTA_STORAGE_KEY, new Date().toISOString().slice(0, 10));
+  } catch (e) {}
+  
+  // Immediately shut down Firestore network stream to eliminate repetitive retry/backoff loops
+  try {
+    disableNetwork(db).catch(() => {});
+  } catch (e) {}
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('cbt_quota_exceeded'));
+  }
+  console.warn(`[Firebase Firestore] Kuota harian gratis tercapai ${context ? `(${context})` : ''}. Mode offline LocalStorage diaktifkan.`);
+}
+
+export async function resetQuotaExceededStatus() {
+  isQuotaExceeded = false;
+  try {
+    localStorage.removeItem(QUOTA_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_QUOTA_STORAGE_KEY);
+  } catch (e) {}
+
+  try {
+    await enableNetwork(db);
+  } catch (e) {}
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('cbt_quota_reset'));
+  }
+}
+
+// If quota is already flagged as exceeded from previous session, disconnect network proactively
+if (typeof window !== 'undefined' && isQuotaExceededStatus()) {
+  try {
+    disableNetwork(db).catch(() => {});
+  } catch (e) {}
+}
+
+// Global interceptor for unhandled Firestore errors
+if (typeof window !== 'undefined') {
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason;
+    const errMsg = String(reason?.message || reason || '');
+    const errCode = String(reason?.code || '');
+    if (
+      errCode === 'resource-exhausted' ||
+      errMsg.includes('Quota limit exceeded') ||
+      errMsg.includes('resource-exhausted') ||
+      errMsg.includes('Free daily write units per project')
+    ) {
+      markQuotaExceeded('global-unhandledrejection');
+      event.preventDefault();
+    }
+  });
+}
+
+function handleFirestoreError(context: string, error: any) {
+  const errMsg = String(error?.message || error || '');
+  const errCode = String(error?.code || '');
+  if (
+    errCode === 'resource-exhausted' ||
+    errMsg.includes('Quota limit exceeded') ||
+    errMsg.includes('Quota exceeded') ||
+    errMsg.includes('resource-exhausted') ||
+    errMsg.includes('Free daily write units per project')
+  ) {
+    markQuotaExceeded(context);
   } else {
-    console.warn(`[Firebase Firestore] Notice (${context}):`, error?.message || error);
+    console.warn(`[Firebase Firestore] Notice (${context}):`, errMsg);
   }
 }
 
@@ -56,7 +153,7 @@ function handleFirestoreError(context: string, error: any) {
  * Save / sync the active CBT AppConfig to Firestore
  */
 export async function saveConfigToFirebase(config: AppConfig): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     const docRef = doc(db, CONFIG_COLLECTION, CONFIG_DOC_ID);
     await setDoc(docRef, {
@@ -74,7 +171,7 @@ export async function saveConfigToFirebase(config: AppConfig): Promise<boolean> 
  * Fetch CBT AppConfig from Firestore
  */
 export async function loadConfigFromFirebase(): Promise<AppConfig | null> {
-  if (isQuotaExceeded) return null;
+  if (isQuotaExceededStatus()) return null;
   try {
     const docRef = doc(db, CONFIG_COLLECTION, CONFIG_DOC_ID);
     const snap = await getDoc(docRef);
@@ -92,24 +189,26 @@ export async function loadConfigFromFirebase(): Promise<AppConfig | null> {
  * Subscribe to real-time updates for AppConfig from Firestore
  */
 export function subscribeConfigFromFirebase(onUpdate: (config: AppConfig) => void): () => void {
-  if (isQuotaExceeded) return () => {};
+  if (isQuotaExceededStatus()) return () => {};
   const docRef = doc(db, CONFIG_COLLECTION, CONFIG_DOC_ID);
   let unsubscribe: () => void = () => {};
-  unsubscribe = onSnapshot(docRef, (snap) => {
-    if (snap.exists()) {
-      const data = snap.data() as AppConfig;
-      if (data && data.questions) {
-        onUpdate(data);
+  try {
+    unsubscribe = onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data() as AppConfig;
+        if (data && data.questions) {
+          onUpdate(data);
+        }
       }
-    }
-  }, (err) => {
-    handleFirestoreError('subscribeConfig', err);
-    if (err?.code === 'resource-exhausted' || err?.message?.includes('Quota limit exceeded')) {
+    }, (err) => {
+      handleFirestoreError('subscribeConfig', err);
       try {
         if (unsubscribe) unsubscribe();
       } catch (e) {}
-    }
-  });
+    });
+  } catch (err) {
+    handleFirestoreError('subscribeConfig', err);
+  }
   return () => {
     try {
       if (unsubscribe) unsubscribe();
@@ -121,7 +220,7 @@ export function subscribeConfigFromFirebase(onUpdate: (config: AppConfig) => voi
  * Save a student exam result to Firestore
  */
 export async function saveStudentResultToFirebase(result: StudentResult): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     const docRef = doc(db, RESULTS_COLLECTION, result.id);
     await setDoc(docRef, result, { merge: true });
@@ -136,7 +235,7 @@ export async function saveStudentResultToFirebase(result: StudentResult): Promis
  * Load all student exam results from Firestore
  */
 export async function loadStudentResultsFromFirebase(): Promise<StudentResult[]> {
-  if (isQuotaExceeded) return [];
+  if (isQuotaExceededStatus()) return [];
   try {
     const querySnap = await getDocs(collection(db, RESULTS_COLLECTION));
     const list: StudentResult[] = [];
@@ -154,7 +253,7 @@ export async function loadStudentResultsFromFirebase(): Promise<StudentResult[]>
  * Delete a batch of student result IDs from Firestore
  */
 export async function deleteSelectedStudentResultsFromFirebase(idsToDelete: string[]): Promise<boolean> {
-  if (isQuotaExceeded || !idsToDelete || idsToDelete.length === 0) return false;
+  if (isQuotaExceededStatus() || !idsToDelete || idsToDelete.length === 0) return false;
   try {
     const batch = writeBatch(db);
     idsToDelete.forEach((id) => {
@@ -173,22 +272,24 @@ export async function deleteSelectedStudentResultsFromFirebase(idsToDelete: stri
  * Subscribe to real-time student results
  */
 export function subscribeStudentResultsFromFirebase(onUpdate: (results: StudentResult[]) => void): () => void {
-  if (isQuotaExceeded) return () => {};
+  if (isQuotaExceededStatus()) return () => {};
   let unsubscribe: () => void = () => {};
-  unsubscribe = onSnapshot(collection(db, RESULTS_COLLECTION), (querySnap) => {
-    const list: StudentResult[] = [];
-    querySnap.forEach((docSnap) => {
-      list.push(docSnap.data() as StudentResult);
-    });
-    onUpdate(list);
-  }, (err) => {
-    handleFirestoreError('subscribeStudentResults', err);
-    if (err?.code === 'resource-exhausted' || err?.message?.includes('Quota limit exceeded')) {
+  try {
+    unsubscribe = onSnapshot(collection(db, RESULTS_COLLECTION), (querySnap) => {
+      const list: StudentResult[] = [];
+      querySnap.forEach((docSnap) => {
+        list.push(docSnap.data() as StudentResult);
+      });
+      onUpdate(list);
+    }, (err) => {
+      handleFirestoreError('subscribeStudentResults', err);
       try {
         if (unsubscribe) unsubscribe();
       } catch (e) {}
-    }
-  });
+    });
+  } catch (err) {
+    handleFirestoreError('subscribeStudentResults', err);
+  }
   return () => {
     try {
       if (unsubscribe) unsubscribe();
@@ -200,7 +301,7 @@ export function subscribeStudentResultsFromFirebase(onUpdate: (results: StudentR
  * Teacher accounts management in Firestore
  */
 export async function saveTeacherToFirebase(teacher: TeacherUser): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     const docRef = doc(db, TEACHERS_COLLECTION, teacher.id);
     await setDoc(docRef, teacher, { merge: true });
@@ -212,7 +313,7 @@ export async function saveTeacherToFirebase(teacher: TeacherUser): Promise<boole
 }
 
 export async function deleteTeacherFromFirebase(teacherId: string): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     await deleteDoc(doc(db, TEACHERS_COLLECTION, teacherId));
     return true;
@@ -223,7 +324,7 @@ export async function deleteTeacherFromFirebase(teacherId: string): Promise<bool
 }
 
 export async function deleteSelectedTeachersFromFirebase(idsToDelete: string[]): Promise<boolean> {
-  if (isQuotaExceeded || !idsToDelete || idsToDelete.length === 0) return false;
+  if (isQuotaExceededStatus() || !idsToDelete || idsToDelete.length === 0) return false;
   try {
     const CHUNK_SIZE = 400;
     for (let i = 0; i < idsToDelete.length; i += CHUNK_SIZE) {
@@ -245,7 +346,7 @@ export async function deleteSelectedTeachersFromFirebase(idsToDelete: string[]):
 }
 
 export async function loadTeachersFromFirebase(): Promise<TeacherUser[]> {
-  if (isQuotaExceeded) return [];
+  if (isQuotaExceededStatus()) return [];
   try {
     const querySnap = await getDocs(collection(db, TEACHERS_COLLECTION));
     const list: TeacherUser[] = [];
@@ -260,7 +361,7 @@ export async function loadTeachersFromFirebase(): Promise<TeacherUser[]> {
 }
 
 export async function saveAllTeachersToFirebase(teachers: TeacherUser[]): Promise<boolean> {
-  if (isQuotaExceeded || !teachers || teachers.length === 0) return false;
+  if (isQuotaExceededStatus() || !teachers || teachers.length === 0) return false;
   try {
     const CHUNK_SIZE = 400;
     for (let i = 0; i < teachers.length; i += CHUNK_SIZE) {
@@ -282,7 +383,7 @@ export async function saveAllTeachersToFirebase(teachers: TeacherUser[]): Promis
 }
 
 export function subscribeTeachersFromFirebase(onUpdate: (teachers: TeacherUser[]) => void): () => void {
-  if (isQuotaExceeded) return () => {};
+  if (isQuotaExceededStatus()) return () => {};
   let unsubscribe: () => void = () => {};
   try {
     const colRef = collection(db, TEACHERS_COLLECTION);
@@ -298,6 +399,9 @@ export function subscribeTeachersFromFirebase(onUpdate: (teachers: TeacherUser[]
       }
     }, (err) => {
       handleFirestoreError('subscribeTeachers', err);
+      try {
+        if (unsubscribe) unsubscribe();
+      } catch (e) {}
     });
   } catch (err) {
     handleFirestoreError('subscribeTeachers', err);
@@ -313,7 +417,7 @@ export function subscribeTeachersFromFirebase(onUpdate: (teachers: TeacherUser[]
  * Admin accounts management in Firestore
  */
 export async function saveAdminToFirebase(admin: AdminUser): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     const docRef = doc(db, ADMINS_COLLECTION, admin.id);
     await setDoc(docRef, admin, { merge: true });
@@ -325,7 +429,7 @@ export async function saveAdminToFirebase(admin: AdminUser): Promise<boolean> {
 }
 
 export async function deleteAdminFromFirebase(adminId: string): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     await deleteDoc(doc(db, ADMINS_COLLECTION, adminId));
     return true;
@@ -336,7 +440,7 @@ export async function deleteAdminFromFirebase(adminId: string): Promise<boolean>
 }
 
 export async function deleteSelectedAdminsFromFirebase(idsToDelete: string[]): Promise<boolean> {
-  if (isQuotaExceeded || !idsToDelete || idsToDelete.length === 0) return false;
+  if (isQuotaExceededStatus() || !idsToDelete || idsToDelete.length === 0) return false;
   try {
     const CHUNK_SIZE = 400;
     for (let i = 0; i < idsToDelete.length; i += CHUNK_SIZE) {
@@ -358,7 +462,7 @@ export async function deleteSelectedAdminsFromFirebase(idsToDelete: string[]): P
 }
 
 export async function loadAdminsFromFirebase(): Promise<AdminUser[]> {
-  if (isQuotaExceeded) return [];
+  if (isQuotaExceededStatus()) return [];
   try {
     const querySnap = await getDocs(collection(db, ADMINS_COLLECTION));
     const list: AdminUser[] = [];
@@ -373,7 +477,7 @@ export async function loadAdminsFromFirebase(): Promise<AdminUser[]> {
 }
 
 export async function saveAllAdminsToFirebase(admins: AdminUser[]): Promise<boolean> {
-  if (isQuotaExceeded || !admins || admins.length === 0) return false;
+  if (isQuotaExceededStatus() || !admins || admins.length === 0) return false;
   try {
     const CHUNK_SIZE = 400;
     for (let i = 0; i < admins.length; i += CHUNK_SIZE) {
@@ -395,7 +499,7 @@ export async function saveAllAdminsToFirebase(admins: AdminUser[]): Promise<bool
 }
 
 export function subscribeAdminsFromFirebase(onUpdate: (admins: AdminUser[]) => void): () => void {
-  if (isQuotaExceeded) return () => {};
+  if (isQuotaExceededStatus()) return () => {};
   let unsubscribe: () => void = () => {};
   try {
     const colRef = collection(db, ADMINS_COLLECTION);
@@ -411,6 +515,9 @@ export function subscribeAdminsFromFirebase(onUpdate: (admins: AdminUser[]) => v
       }
     }, (err) => {
       handleFirestoreError('subscribeAdmins', err);
+      try {
+        if (unsubscribe) unsubscribe();
+      } catch (e) {}
     });
   } catch (err) {
     handleFirestoreError('subscribeAdmins', err);
@@ -426,7 +533,7 @@ export function subscribeAdminsFromFirebase(onUpdate: (admins: AdminUser[]) => v
  * Student accounts management in Firestore
  */
 export async function saveStudentToFirebase(student: StudentUser): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     const docRef = doc(db, STUDENTS_COLLECTION, student.id);
     await setDoc(docRef, student, { merge: true });
@@ -438,7 +545,7 @@ export async function saveStudentToFirebase(student: StudentUser): Promise<boole
 }
 
 export async function deleteStudentFromFirebase(studentId: string): Promise<boolean> {
-  if (isQuotaExceeded) return false;
+  if (isQuotaExceededStatus()) return false;
   try {
     await deleteDoc(doc(db, STUDENTS_COLLECTION, studentId));
     return true;
@@ -449,7 +556,7 @@ export async function deleteStudentFromFirebase(studentId: string): Promise<bool
 }
 
 export async function deleteSelectedStudentsFromFirebase(idsToDelete: string[]): Promise<boolean> {
-  if (isQuotaExceeded || !idsToDelete || idsToDelete.length === 0) return false;
+  if (isQuotaExceededStatus() || !idsToDelete || idsToDelete.length === 0) return false;
   try {
     const CHUNK_SIZE = 400;
     for (let i = 0; i < idsToDelete.length; i += CHUNK_SIZE) {
@@ -471,7 +578,7 @@ export async function deleteSelectedStudentsFromFirebase(idsToDelete: string[]):
 }
 
 export async function loadStudentsFromFirebase(): Promise<StudentUser[]> {
-  if (isQuotaExceeded) return [];
+  if (isQuotaExceededStatus()) return [];
   try {
     const querySnap = await getDocs(collection(db, STUDENTS_COLLECTION));
     const list: StudentUser[] = [];
@@ -486,7 +593,7 @@ export async function loadStudentsFromFirebase(): Promise<StudentUser[]> {
 }
 
 export async function saveAllStudentsToFirebase(students: StudentUser[]): Promise<boolean> {
-  if (isQuotaExceeded || !students || students.length === 0) return false;
+  if (isQuotaExceededStatus() || !students || students.length === 0) return false;
   try {
     const CHUNK_SIZE = 400;
     for (let i = 0; i < students.length; i += CHUNK_SIZE) {
@@ -508,7 +615,7 @@ export async function saveAllStudentsToFirebase(students: StudentUser[]): Promis
 }
 
 export function subscribeStudentsFromFirebase(onUpdate: (students: StudentUser[]) => void): () => void {
-  if (isQuotaExceeded) return () => {};
+  if (isQuotaExceededStatus()) return () => {};
   let unsubscribe: () => void = () => {};
   try {
     const colRef = collection(db, STUDENTS_COLLECTION);
@@ -524,6 +631,9 @@ export function subscribeStudentsFromFirebase(onUpdate: (students: StudentUser[]
       }
     }, (err) => {
       handleFirestoreError('subscribeStudents', err);
+      try {
+        if (unsubscribe) unsubscribe();
+      } catch (e) {}
     });
   } catch (err) {
     handleFirestoreError('subscribeStudents', err);
